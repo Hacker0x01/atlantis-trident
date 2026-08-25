@@ -23,3 +23,12 @@ jobs:
           if [ ${#files[@]} -eq 0 ]; then echo "no standalone .sh files"; exit 0; fi
           docker run --rm -v "$PWD:/mnt" -w /mnt \
             koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb "${files[@]}"
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '20'
+      - name: Unit tests
+        run: node --test

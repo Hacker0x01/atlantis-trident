@@ -1,0 +1,48 @@
+name: tf-plan-comment
+description: Upsert a sticky PR comment with per-stack Terraform plan output.
+inputs:
+  plans_dir:
+    description: Directory containing <stack>.txt plan files.
+    required: true
+  stacks:
+    description: Space-separated stack names, in order.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+      env:
+        PLANS_DIR: ${{ inputs.plans_dir }}
+        STACKS: ${{ inputs.stacks }}
+      with:
+        script: |
+          const { buildComment, MARKER } = require(
+            `${process.env.GITHUB_ACTION_PATH}/build-comment.js`,
+          );
+          const stacks = process.env.STACKS.trim().split(/\s+/);
+          const headSha = context.payload.pull_request?.head?.sha ?? context.sha;
+          const ranAt = new Date()
+            .toISOString()
+            .replace('T', ' ')
+            .replace(/\.\d+Z$/, ' UTC');
+          const { owner, repo } = context.repo;
+          const runUrl = `${process.env.GITHUB_SERVER_URL}/${owner}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+          const body = buildComment({
+            stacks,
+            plansDir: process.env.PLANS_DIR,
+            headSha,
+            runUrl,
+            ranAt,
+          });
+          const issue_number = context.issue.number;
+          const existing = await github.paginate(github.rest.issues.listComments, {
+            owner, repo, issue_number, per_page: 100,
+          });
+          const prior = existing.find(
+            (c) => c.user?.type === 'Bot' && c.body?.includes(MARKER),
+          );
+          if (prior) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body });
+          } else {
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+          }

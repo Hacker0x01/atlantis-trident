@@ -1,0 +1,14 @@
+name: terraform-plan
+on:
+  pull_request:
+    paths: ["terraform/**", ".github/workflows/terraform-plan.yml"]
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+jobs:
+  plan:
+    uses: Hacker0x01/atlantis-trident/.github/workflows/terraform-plan.yml@v1
+    with:
+      stacks: "storage catalog"   # space-separated, in dependency order
+    secrets: inherit

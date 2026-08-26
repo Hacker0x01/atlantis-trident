@@ -1,0 +1,118 @@
+name: terraform-plan
+on:
+  workflow_call:
+    inputs:
+      stacks:
+        description: Space-separated, dependency-ordered stack names under <working_directory>/stacks/.
+        required: true
+        type: string
+      terraform_version:
+        required: false
+        type: string
+        default: "1.11.4"
+      aws_region:
+        required: false
+        type: string
+        default: "us-west-2"
+      project:
+        description: Name prefix for the state bucket; defaults to the repo name.
+        required: false
+        type: string
+        default: ""
+      working_directory:
+        required: false
+        type: string
+        default: "terraform"
+      aws_auth:
+        description: "oidc (default) or none (offline validate/plan with -backend=false)."
+        required: false
+        type: string
+        default: "oidc"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: terraform-plan-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Setup
+        id: setup
+        uses: ./.github/actions/setup-terraform-aws
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          aws_region: ${{ inputs.aws_region }}
+          project: ${{ inputs.project }}
+          role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws_auth: ${{ inputs.aws_auth }}
+      - name: Format check
+        id: fmt
+        continue-on-error: true
+        shell: bash
+        run: terraform fmt -check -recursive
+      - name: Plan each stack
+        id: plan
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ steps.setup.outputs.state_bucket }}
+          STACKS: ${{ inputs.stacks }}
+          AWS_AUTH: ${{ inputs.aws_auth }}
+        run: |
+          set +e
+          plans_dir="$RUNNER_TEMP/plans"
+          mkdir -p "$plans_dir"
+          status=0
+          # shellcheck disable=SC2086
+          for stack in $STACKS; do
+            echo "::group::plan $stack"
+            if [ "$AWS_AUTH" = "none" ]; then
+              terraform -chdir="stacks/$stack" init -input=false -backend=false \
+                || { status=1; echo "::endgroup::"; continue; }
+            else
+              terraform -chdir="stacks/$stack" init -input=false -backend-config="bucket=$STATE_BUCKET" \
+                || { status=1; echo "::endgroup::"; continue; }
+            fi
+            terraform -chdir="stacks/$stack" validate -no-color || status=1
+            if ! terraform -chdir="stacks/$stack" plan -input=false -no-color -out="tfplan.$stack"; then
+              status=1
+            fi
+            terraform -chdir="stacks/$stack" show -no-color "tfplan.$stack" \
+              > "$plans_dir/$stack.txt" 2>&1 || true
+            echo "::endgroup::"
+          done
+          echo "plans_dir=$plans_dir" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Comment plans on PR
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: ./.github/actions/tf-plan-comment
+        with:
+          plans_dir: ${{ steps.plan.outputs.plans_dir }}
+          stacks: ${{ inputs.stacks }}
+      - name: Enforce results
+        if: always()
+        shell: bash
+        env:
+          FMT_OUTCOME: ${{ steps.fmt.outcome }}
+          PLAN_STATUS: ${{ steps.plan.outputs.status }}
+        run: |
+          set -euo pipefail
+          failed=0
+          if [ "$FMT_OUTCOME" != "success" ]; then
+            echo "::error::Format check failed. Run 'terraform fmt -recursive' to fix."
+            failed=1
+          fi
+          if [ "$PLAN_STATUS" != "0" ]; then
+            echo "::error::One or more stacks failed to plan."
+            failed=1
+          fi
+          exit $failed

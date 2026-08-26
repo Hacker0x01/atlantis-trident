@@ -1,0 +1,70 @@
+name: terraform-apply
+on:
+  workflow_call:
+    inputs:
+      stacks:
+        description: Space-separated, dependency-ordered stack names under <working_directory>/stacks/.
+        required: true
+        type: string
+      terraform_version:
+        required: false
+        type: string
+        default: "1.11.4"
+      aws_region:
+        required: false
+        type: string
+        default: "us-west-2"
+      project:
+        required: false
+        type: string
+        default: ""
+      working_directory:
+        required: false
+        type: string
+        default: "terraform"
+      environment:
+        description: Protected environment gating the apply (required reviewers).
+        required: false
+        type: string
+        default: "production"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-apply-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Setup
+        id: setup
+        uses: ./.github/actions/setup-terraform-aws
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          aws_region: ${{ inputs.aws_region }}
+          project: ${{ inputs.project }}
+          role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws_auth: oidc
+      - name: Apply stacks in order
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ steps.setup.outputs.state_bucket }}
+          STACKS: ${{ inputs.stacks }}
+        run: |
+          set -e
+          # shellcheck disable=SC2086
+          for stack in $STACKS; do
+            echo "::group::apply $stack"
+            terraform -chdir="stacks/$stack" init -input=false -backend-config="bucket=$STATE_BUCKET"
+            terraform -chdir="stacks/$stack" apply -input=false -auto-approve
+            echo "::endgroup::"
+          done

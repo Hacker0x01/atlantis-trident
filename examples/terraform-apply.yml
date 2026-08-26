@@ -1,0 +1,14 @@
+name: terraform-apply
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**", ".github/workflows/terraform-apply.yml"]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  apply:
+    uses: Hacker0x01/atlantis-trident/.github/workflows/terraform-apply.yml@v1
+    with:
+      stacks: "storage catalog"
+    secrets: inherit

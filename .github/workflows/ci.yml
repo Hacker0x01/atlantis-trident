@@ -3,6 +3,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -34,7 +35,13 @@ jobs:
         run: node --test
   smoke:
     needs: [lint, unit]
+    # A caller must grant every permission the called reusable workflow
+    # declares at its top level, even ones this run won't exercise: a reusable
+    # workflow cannot escalate beyond its caller, so omitting id-token here
+    # makes terraform-plan.yml's `id-token: write` an escalation and the run
+    # fails at startup. aws_auth=none means no token is actually minted.
     permissions:
+      id-token: write
       contents: read
       pull-requests: write
     uses: ./.github/workflows/terraform-plan.yml
@@ -42,3 +49,6 @@ jobs:
       stacks: "hello"
       working_directory: examples/fixture
       aws_auth: none
+    # terraform-plan.yml references secrets.AWS_GITHUB_ACTIONS_ROLE_ARN; inherit
+    # so the call satisfies the reference (unused when aws_auth=none).
+    secrets: inherit

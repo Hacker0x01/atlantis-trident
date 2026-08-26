@@ -32,3 +32,14 @@ jobs:
           node-version: '20'
       - name: Unit tests
         run: node --test
+  smoke:
+    needs: [lint, unit]
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/terraform-plan.yml
+    with:
+      stacks: "hello"
+      working_directory: examples/fixture
+      aws_auth: none

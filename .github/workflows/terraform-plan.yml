@@ -48,7 +48,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Setup
         id: setup
-        uses: ./.github/actions/setup-terraform-aws
+        # Full owner/repo path + release ref: a reusable workflow's `./` paths
+        # resolve against the CALLER's checkout, not this repo, so local refs
+        # break for every cross-repo consumer. Composite refs track the release
+        # tag. @main is temporary for pre-v1 verification — flip to @v1 at release.
+        uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@main
         with:
           terraform_version: ${{ inputs.terraform_version }}
           aws_region: ${{ inputs.aws_region }}
@@ -94,7 +98,8 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
       - name: Comment plans on PR
         if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: ./.github/actions/tf-plan-comment
+        # Full path + release ref (see the setup step's note); @main pre-v1 -> @v1 at release.
+        uses: Hacker0x01/atlantis-trident/.github/actions/tf-plan-comment@main
         with:
           plans_dir: ${{ steps.plan.outputs.plans_dir }}
           stacks: ${{ inputs.stacks }}

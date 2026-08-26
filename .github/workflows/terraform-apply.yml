@@ -50,7 +50,7 @@ jobs:
         # Full owner/repo path + release ref: a reusable workflow's `./` paths
         # resolve against the CALLER's checkout, not this repo. Composite refs
         # track the release tag. @main is temporary pre-v1 — flip to @v1 at release.
-        uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@main
+        uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@v1
         with:
           terraform_version: ${{ inputs.terraform_version }}
           aws_region: ${{ inputs.aws_region }}

@@ -9,7 +9,8 @@ inputs:
     required: true
   project:
     description: Name prefix; state bucket is <project>-tfstate-<account>.
-    required: true
+    required: false
+    default: ""
   role_arn:
     description: OIDC role ARN to assume (required when aws_auth=oidc).
     required: false
@@ -52,11 +53,13 @@ runs:
       env:
         AWS_AUTH: ${{ inputs.aws_auth }}
         PROJECT: ${{ inputs.project }}
+        REPO_NAME: ${{ github.event.repository.name }}
       run: |
         set -euo pipefail
+        project="${PROJECT:-$REPO_NAME}"
         if [ "$AWS_AUTH" = "oidc" ]; then
           account="$(aws sts get-caller-identity --query Account --output text)"
-          echo "state_bucket=${PROJECT}-tfstate-${account}" >> "$GITHUB_OUTPUT"
+          echo "state_bucket=${project}-tfstate-${account}" >> "$GITHUB_OUTPUT"
         else
           echo "state_bucket=" >> "$GITHUB_OUTPUT"
         fi

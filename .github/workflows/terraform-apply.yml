@@ -45,24 +45,13 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-      - name: Resolve project
-        id: proj
-        shell: bash
-        env:
-          IN_PROJECT: ${{ inputs.project }}
-          REPO_NAME: ${{ github.event.repository.name }}
-        run: |
-          set -euo pipefail
-          project="$IN_PROJECT"
-          [ -n "$project" ] || project="$REPO_NAME"
-          echo "project=$project" >> "$GITHUB_OUTPUT"
       - name: Setup
         id: setup
         uses: ./.github/actions/setup-terraform-aws
         with:
           terraform_version: ${{ inputs.terraform_version }}
           aws_region: ${{ inputs.aws_region }}
-          project: ${{ steps.proj.outputs.project }}
+          project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws_auth: oidc
       - name: Apply stacks in order
@@ -72,6 +61,7 @@ jobs:
           STACKS: ${{ inputs.stacks }}
         run: |
           set -e
+          # shellcheck disable=SC2086
           for stack in $STACKS; do
             echo "::group::apply $stack"
             terraform -chdir="stacks/$stack" init -input=false -backend-config="bucket=$STATE_BUCKET"

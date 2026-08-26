@@ -66,3 +66,20 @@ test('bodies over 50k chars are truncated', () => {
   });
   assert.match(out, /\.\.\. \(truncated\)/);
 });
+
+test('many stacks with large bodies stay under 65536 total', () => {
+  const stacks = Array.from({ length: 8 }, (_, i) => `stack${i}`);
+  const files = {};
+  stacks.forEach((s) => {
+    files[`/plans/${s}.txt`] = 'x'.repeat(50000);
+  });
+  const out = buildComment({
+    stacks,
+    plansDir: '/plans',
+    headSha: '0000000',
+    runUrl: 'u',
+    ranAt: 't',
+    fs: fakeFs(files),
+  });
+  assert.ok(out.length < 65536, `comment body is ${out.length} chars (must be < 65536)`);
+});

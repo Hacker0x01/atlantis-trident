@@ -10,5 +10,12 @@ jobs:
   apply:
     uses: Hacker0x01/atlantis-trident/.github/workflows/terraform-apply.yml@v1
     with:
-      stacks: "storage catalog"
+      # Ordered stacks applied serially (one flow per stack, max-parallel 1).
+      # Use for stacks with dependencies (e.g., one reads another's remote_state).
+      ordered_stacks: "storage catalog"
+      # Parallel stacks applied in parallel (one flow per stack), AFTER the ordered group.
+      # Use for independent stacks.
+      parallel_stacks: "messaging secrets datadog mwaa"
+      # Legacy: `stacks` is a back-compat alias for `ordered_stacks`.
+      # If you only have ordered stacks, you can still use `stacks: "storage catalog"`.
     secrets: inherit

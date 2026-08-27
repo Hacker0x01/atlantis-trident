@@ -175,6 +175,180 @@ See `RELEASING.md` for the release procedure.
 
 ---
 
+## Lambda build + deploy
+
+For repos that build a Lambda function and deploy it with Terraform (**Model B**: build artifact → Terraform apply), Atlantis Trident provides two additional reusable workflows:
+
+- **`terraform-lambda-plan.yml`** — runs on pull requests: builds the Lambda zip, exports it as `TF_VAR_lambda_zip`, runs format check + validate + plan, and posts a sticky PR comment.
+- **`terraform-lambda-deploy.yml`** — runs on main branch pushes: builds the Lambda zip, exports it as `TF_VAR_lambda_zip`, and applies after a protected environment approval gate.
+
+These workflows are **single-app**: they build one artifact and apply one Terraform root per invocation. Multi-app repos (monorepos with multiple Lambda functions) should drive a matrix in their own caller workflow and invoke the reusable workflow once per app.
+
+### When to use
+
+Use the Lambda workflows when:
+
+1. Your repo builds a Lambda function (Python, Node, etc.) as a zip artifact.
+2. Your Terraform code consumes that zip via a `variable "lambda_zip"` and uses it as the `filename` and `source_code_hash` for `aws_lambda_function`.
+3. You want centralized build + deploy logic (Python + uv setup, Terraform + AWS setup, plan comments, apply gates) without copy-pasting it into every Lambda repo.
+
+For repos that only manage Terraform stacks (no build step), use the standard `terraform-plan.yml` and `terraform-apply.yml` workflows instead.
+
+### Onboard a Lambda repo
+
+#### 1. Copy the caller workflows
+
+Copy `examples/terraform-lambda-plan.yml` and `examples/terraform-lambda-deploy.yml` into `.github/workflows/` in your repo.
+
+Edit the `build_command` and `artifact_path` inputs to match your build:
+
+```yaml
+with:
+  build_command: "uv run mypkg build"   # your build command; must write artifact_path
+  artifact_path: "dist/lambda.zip"      # relative path to the zip
+```
+
+#### 2. Ensure the repository has the required secret and environment
+
+- **Secret:** `AWS_GITHUB_ACTIONS_ROLE_ARN` (repository or organization secret)  
+  Set at *Settings → Secrets and variables → Actions*.  
+  Value: the ARN of your OIDC-enabled GitHub Actions deploy role.
+
+- **Protected environment:** `production` (or override with the `environment` input)  
+  Set at *Settings → Environments*.  
+  Configure required reviewers to gate applies.
+
+#### 3. Declare the `variable "lambda_zip"` in your Terraform
+
+Your Terraform code must declare:
+
+```hcl
+variable "lambda_zip" {
+  type        = string
+  description = "Path to the built Lambda zip (exported by the reusable workflow)."
+}
+```
+
+Then reference it in your `aws_lambda_function` resource:
+
+```hcl
+resource "aws_lambda_function" "example" {
+  function_name    = "my-function"
+  filename         = var.lambda_zip
+  source_code_hash = filebase64sha256(var.lambda_zip)
+  runtime          = "python3.13"
+  handler          = "handler.handler"
+  role             = aws_iam_role.lambda.arn
+}
+```
+
+The workflow exports `TF_VAR_lambda_zip` as an **absolute path** to the built zip, so Terraform can consume it.
+
+#### 4. Push and open a PR
+
+The plan workflow runs on PRs that touch `terraform/**`, `src/**`, or `.github/workflows/terraform-lambda-plan.yml`. The apply workflow runs on merges to `main` after a reviewer approves the protected environment.
+
+---
+
+### Build contract
+
+- **Your `build_command` must write `artifact_path`**  
+  The workflow runs your build command, then asserts that the file exists. If it doesn't, the build step fails.
+
+- **The workflow exports `TF_VAR_lambda_zip` as an absolute path**  
+  After the build, the workflow resolves the artifact path to an absolute path and exports `TF_VAR_lambda_zip=<absolute-path>` to the Terraform environment. Your Terraform code consumes it via `variable "lambda_zip"` and uses it for `filename` and `source_code_hash`.
+
+### Secrets and TF vars
+
+The Lambda workflows provide two mechanisms for passing values into Terraform:
+
+1. **`tf_vars` (non-sensitive)** — multiline `KEY=value` text. Each becomes `TF_VAR_<key>`, unmasked. Use for configuration that can appear in plan output.
+
+2. **`tf_var_secrets` (sensitive)** — multiline `KEY=value` text assembled from the caller's own secrets. Each becomes `TF_VAR_<key>`, **masked** in GitHub Actions logs. Use for secrets (API keys, passwords) that must not leak.
+
+   **Important:** Because a named `secrets:` block precludes `secrets: inherit`, you must pass `AWS_GITHUB_ACTIONS_ROLE_ARN` explicitly:
+
+   ```yaml
+   secrets:
+     AWS_GITHUB_ACTIONS_ROLE_ARN: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+     tf_var_secrets: |
+       some_api_key=${{ secrets.SOME_API_KEY }}
+   ```
+
+3. **Mark secrets as `sensitive = true` in Terraform**  
+   Any secret that appears in Terraform plan output (e.g., as a Lambda environment variable or resource tag) **must** be declared `sensitive = true` in your `variable` block. Otherwise, the value will leak into the plan comment on the PR.
+
+   ```hcl
+   variable "some_secret" {
+     type        = string
+     description = "API key for external service."
+     sensitive   = true
+   }
+   ```
+
+See `examples/terraform-lambda-plan.yml`, `examples/terraform-lambda-deploy.yml`, and `examples/lambda-fixture/terraform/main.tf` for complete examples.
+
+---
+
+### Inputs reference (Lambda workflows)
+
+#### `terraform-lambda-plan.yml`
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `build_command` | **Yes** | — | Shell command to build the Lambda artifact. Must write `artifact_path`. |
+| `artifact_path` | **Yes** | — | Relative path to the Lambda zip produced by `build_command`. |
+| `working_directory` | No | `terraform` | Directory containing your Terraform root module. |
+| `python_version` | No | `3.13` | Python version for the build (if needed). |
+| `use_uv` | No | `true` | Whether to install `uv` and run `uv sync` before the build. Set to `false` if you don't use `uv`. |
+| `tf_vars` | No | `""` | Multiline `KEY=value` text for non-sensitive Terraform variables. Each becomes `TF_VAR_<key>`, unmasked. |
+| `terraform_version` | No | `1.11.4` | Terraform version to install. |
+| `aws_region` | No | `us-west-2` | AWS region for OIDC and Terraform operations. |
+| `project` | No | Repository name | Name prefix for the state bucket; bucket is `<project>-tfstate-<account>`. |
+| `aws_auth` | No | `oidc` | Authentication mode: `oidc` (default, uses OIDC role) or `none` (offline validate/plan with `-backend=false`). |
+
+**Secrets:**
+- `tf_var_secrets` (optional) — multiline `KEY=value` text for sensitive Terraform variables. Each becomes `TF_VAR_<key>`, masked in logs.
+- `AWS_GITHUB_ACTIONS_ROLE_ARN` (optional, required if `aws_auth: oidc`) — ARN of the OIDC-enabled GitHub Actions role.
+
+**Permissions:** Declare in the caller workflow:
+```yaml
+permissions:
+  id-token: write       # for OIDC
+  contents: read
+  pull-requests: write  # for the sticky comment
+```
+
+---
+
+#### `terraform-lambda-deploy.yml`
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `build_command` | **Yes** | — | Shell command to build the Lambda artifact. Must write `artifact_path`. |
+| `artifact_path` | **Yes** | — | Relative path to the Lambda zip produced by `build_command`. |
+| `working_directory` | No | `terraform` | Directory containing your Terraform root module. |
+| `python_version` | No | `3.13` | Python version for the build (if needed). |
+| `use_uv` | No | `true` | Whether to install `uv` and run `uv sync` before the build. Set to `false` if you don't use `uv`. |
+| `tf_vars` | No | `""` | Multiline `KEY=value` text for non-sensitive Terraform variables. Each becomes `TF_VAR_<key>`, unmasked. |
+| `terraform_version` | No | `1.11.4` | Terraform version to install. |
+| `aws_region` | No | `us-west-2` | AWS region for OIDC and Terraform operations. |
+| `project` | No | Repository name | Name prefix for the state bucket; bucket is `<project>-tfstate-<account>`. |
+| `environment` | No | `production` | Protected environment name (gates apply with required reviewers). |
+
+**Secrets:**
+- `tf_var_secrets` (optional) — multiline `KEY=value` text for sensitive Terraform variables. Each becomes `TF_VAR_<key>`, masked in logs.
+- `AWS_GITHUB_ACTIONS_ROLE_ARN` (optional) — ARN of the OIDC-enabled GitHub Actions role. (Deploy always uses OIDC auth; no offline mode.)
+
+**Permissions:** Declare in the caller workflow:
+```yaml
+permissions:
+  id-token: write   # for OIDC
+  contents: read
+```
+
+---
+
 ## Development
 
 Self-CI runs on every PR:

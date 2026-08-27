@@ -1,0 +1,95 @@
+name: build-deploy-lambda
+description: >
+  Build one Lambda artifact and deploy it with Terraform (Model B). Encapsulates
+  the per-app sequence so terraform-lambda-deploy can call it from both its
+  ordered and parallel matrix jobs without duplicating steps. The caller job must
+  have already run actions/checkout.
+inputs:
+  build_command: { required: true, description: Shell command that writes the zip to artifact_path. }
+  artifact_path: { required: true, description: Path to the built zip (exported as TF_VAR_lambda_zip). }
+  working_directory: { required: false, default: "terraform", description: Terraform root for this app. }
+  python_version: { required: false, default: "3.13" }
+  use_uv: { required: false, default: "true" }
+  tf_vars: { required: false, default: "", description: Multiline KEY=value of non-secret TF vars. }
+  tf_var_secrets: { required: false, default: "", description: Multiline KEY=value of secret TF vars (masked). }
+  terraform_version: { required: false, default: "1.11.4" }
+  aws_region: { required: false, default: "us-west-2" }
+  project: { required: false, default: "" }
+  role_arn: { required: false, default: "", description: OIDC role ARN (from AWS_GITHUB_ACTIONS_ROLE_ARN). }
+runs:
+  using: composite
+  steps:
+    - name: Resolve project
+      id: proj
+      shell: bash
+      env:
+        IN_PROJECT: ${{ inputs.project }}
+        REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        set -euo pipefail
+        project="$IN_PROJECT"
+        [ -n "$project" ] || project="$REPO_NAME"
+        echo "project=$project" >> "$GITHUB_OUTPUT"
+    - name: Set up Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+      with:
+        python-version: ${{ inputs.python_version }}
+    - name: Set up uv
+      if: ${{ inputs.use_uv == 'true' }}
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+    - name: uv sync
+      if: ${{ inputs.use_uv == 'true' }}
+      shell: bash
+      run: uv sync --frozen || uv sync
+    - name: Build Lambda artifact
+      shell: bash
+      env:
+        BUILD_COMMAND: ${{ inputs.build_command }}
+        ARTIFACT_PATH: ${{ inputs.artifact_path }}
+      run: |
+        set -euo pipefail
+        bash -euo pipefail -c "$BUILD_COMMAND"
+        if [ ! -f "$ARTIFACT_PATH" ]; then
+          echo "::error::build_command did not produce artifact_path: $ARTIFACT_PATH"
+          exit 1
+        fi
+    - name: Setup Terraform + AWS
+      id: setup
+      uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@v1
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        aws_region: ${{ inputs.aws_region }}
+        project: ${{ steps.proj.outputs.project }}
+        role_arn: ${{ inputs.role_arn }}
+        aws_auth: oidc
+    - name: Export TF vars
+      shell: bash
+      env:
+        ARTIFACT_PATH: ${{ inputs.artifact_path }}
+        TF_VARS: ${{ inputs.tf_vars }}
+        TF_VAR_SECRETS: ${{ inputs.tf_var_secrets }}
+      run: |
+        set -euo pipefail
+        abs="$(cd "$(dirname "$ARTIFACT_PATH")" && pwd)/$(basename "$ARTIFACT_PATH")"
+        echo "TF_VAR_lambda_zip=$abs" >> "$GITHUB_ENV"
+        emit() {
+          local mask="$1" text="$2" line key val
+          while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            key="${line%%=*}"; val="${line#*=}"
+            [ -z "$key" ] && continue
+            [ "$mask" = "mask" ] && echo "::add-mask::$val"
+            printf 'TF_VAR_%s=%s\n' "$key" "$val" >> "$GITHUB_ENV"
+          done <<< "$text"
+        }
+        if [ -n "${TF_VARS:-}" ]; then emit nomask "$TF_VARS"; fi
+        if [ -n "${TF_VAR_SECRETS:-}" ]; then emit mask "$TF_VAR_SECRETS"; fi
+    - name: Apply
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        STATE_BUCKET: ${{ steps.setup.outputs.state_bucket }}
+      run: |
+        set -e
+        terraform init -input=false -backend-config="bucket=$STATE_BUCKET"
+        terraform apply -input=false -auto-approve

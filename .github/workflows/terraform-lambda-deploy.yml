@@ -1,0 +1,156 @@
+name: terraform-lambda-deploy
+on:
+  workflow_call:
+    inputs:
+      # App groups: JSON arrays of objects, each:
+      #   { "build_command": "...", "artifact_path": "...", "working_directory": "..." }
+      ordered_apps:
+        description: JSON array of apps built+applied SERIALLY in order (one flow each).
+        required: false
+        type: string
+        default: ""
+      parallel_apps:
+        description: JSON array of apps built+applied in PARALLEL, after the ordered group.
+        required: false
+        type: string
+        default: ""
+      apps:
+        description: DEPRECATED back-compat alias for parallel_apps.
+        required: false
+        type: string
+        default: ""
+      # Single-app scalar inputs (used only when no app lists are given).
+      build_command: { required: false, type: string, default: "" }
+      artifact_path: { required: false, type: string, default: "" }
+      working_directory: { required: false, type: string, default: "terraform" }
+      python_version: { required: false, type: string, default: "3.13" }
+      use_uv: { required: false, type: boolean, default: true }
+      tf_vars: { required: false, type: string, default: "" }
+      terraform_version: { required: false, type: string, default: "1.11.4" }
+      aws_region: { required: false, type: string, default: "us-west-2" }
+      project: { required: false, type: string, default: "" }
+      environment:
+        description: >
+          Protected environment (required reviewers). NOTE: each app is a
+          separate deployment to this environment and needs its own approval.
+        required: false
+        type: string
+        default: "production"
+    secrets:
+      tf_var_secrets: { required: false }
+      AWS_GITHUB_ACTIONS_ROLE_ARN: { required: false }
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-lambda-deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      ordered: ${{ steps.m.outputs.ordered }}
+      parallel: ${{ steps.m.outputs.parallel }}
+    steps:
+      - name: Build app matrices
+        id: m
+        shell: bash
+        env:
+          ORDERED_APPS: ${{ inputs.ordered_apps }}
+          PARALLEL_APPS: ${{ inputs.parallel_apps }}
+          APPS: ${{ inputs.apps }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          ARTIFACT_PATH: ${{ inputs.artifact_path }}
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          # Keep entries with build_command + artifact_path; default working_directory.
+          normalize() { jq -c 'map(select(.build_command and .artifact_path) | .working_directory //= "terraform")' <<< "$1"; }
+
+          ordered="[]"
+          if [ -n "${ORDERED_APPS:-}" ] && [ "$ORDERED_APPS" != "[]" ]; then
+            ordered="$(normalize "$ORDERED_APPS")"
+            if [ "$ordered" = "[]" ]; then
+              echo "::error::ordered_apps provided but no valid entries (each needs build_command + artifact_path)"
+              exit 1
+            fi
+          fi
+
+          parallel_src="${PARALLEL_APPS:-}"
+          [ -n "$parallel_src" ] || parallel_src="${APPS:-}"   # back-compat alias
+          parallel="[]"
+          if [ -n "$parallel_src" ] && [ "$parallel_src" != "[]" ]; then
+            parallel="$(normalize "$parallel_src")"
+            if [ "$parallel" = "[]" ]; then
+              echo "::error::parallel_apps/apps provided but no valid entries (each needs build_command + artifact_path)"
+              exit 1
+            fi
+          elif [ "$ordered" = "[]" ] && [ -n "$BUILD_COMMAND" ] && [ -n "$ARTIFACT_PATH" ]; then
+            # single-app fallback from scalar inputs
+            parallel="$(jq -cn \
+              --arg b "$BUILD_COMMAND" --arg a "$ARTIFACT_PATH" --arg w "$WORKING_DIRECTORY" \
+              '[{build_command:$b, artifact_path:$a, working_directory:$w}]')"
+          fi
+
+          if [ "$ordered" = "[]" ] && [ "$parallel" = "[]" ]; then
+            echo "::error::no apps provided (set ordered_apps/parallel_apps, or build_command + artifact_path)"
+            exit 1
+          fi
+          echo "ordered=$ordered" >> "$GITHUB_OUTPUT"
+          echo "parallel=$parallel" >> "$GITHUB_OUTPUT"
+
+  deploy-ordered:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.ordered != '[]' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        app: ${{ fromJSON(needs.prepare.outputs.ordered) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: Hacker0x01/atlantis-trident/.github/actions/build-deploy-lambda@v1
+        with:
+          build_command: ${{ matrix.app.build_command }}
+          artifact_path: ${{ matrix.app.artifact_path }}
+          working_directory: ${{ matrix.app.working_directory }}
+          python_version: ${{ inputs.python_version }}
+          use_uv: ${{ inputs.use_uv }}
+          tf_vars: ${{ inputs.tf_vars }}
+          tf_var_secrets: ${{ secrets.tf_var_secrets }}
+          terraform_version: ${{ inputs.terraform_version }}
+          aws_region: ${{ inputs.aws_region }}
+          project: ${{ inputs.project }}
+          role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+
+  deploy-parallel:
+    needs: [prepare, deploy-ordered]
+    # Allowlist (success||skipped) so a cancelled ordered group also blocks the
+    # parallel group; prepare.result guard is required alongside !cancelled().
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.deploy-ordered.result == 'success' || needs.deploy-ordered.result == 'skipped') && needs.prepare.outputs.parallel != '[]' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.prepare.outputs.parallel) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: Hacker0x01/atlantis-trident/.github/actions/build-deploy-lambda@v1
+        with:
+          build_command: ${{ matrix.app.build_command }}
+          artifact_path: ${{ matrix.app.artifact_path }}
+          working_directory: ${{ matrix.app.working_directory }}
+          python_version: ${{ inputs.python_version }}
+          use_uv: ${{ inputs.use_uv }}
+          tf_vars: ${{ inputs.tf_vars }}
+          tf_var_secrets: ${{ secrets.tf_var_secrets }}
+          terraform_version: ${{ inputs.terraform_version }}
+          aws_region: ${{ inputs.aws_region }}
+          project: ${{ inputs.project }}
+          role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}

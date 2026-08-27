@@ -59,7 +59,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${APPS:-}" ] && [ "$APPS" != "[]" ]; then
-            matrix="$(echo "$APPS" | jq -c 'map(select(.build_command and .artifact_path))')"
+            # Keep entries with build_command + artifact_path; default working_directory.
+            matrix="$(echo "$APPS" | jq -c 'map(select(.build_command and .artifact_path) | .working_directory //= "terraform")')"
           else
             if [ -z "$BUILD_COMMAND" ] || [ -z "$ARTIFACT_PATH" ]; then
               echo "::error::provide either the apps input (JSON array) or build_command + artifact_path"
@@ -70,6 +71,10 @@ jobs:
               --arg a "$ARTIFACT_PATH" \
               --arg w "$WORKING_DIRECTORY" \
               '[{build_command:$b, artifact_path:$a, working_directory:$w}]')"
+          fi
+          if [ "$matrix" = "[]" ]; then
+            echo "::error::no apps resolved (each apps entry needs build_command + artifact_path)"
+            exit 1
           fi
           echo "apps=$matrix" >> "$GITHUB_OUTPUT"
 

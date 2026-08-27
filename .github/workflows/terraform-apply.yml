@@ -59,8 +59,13 @@ jobs:
           STACKS: ${{ inputs.stacks }}
         run: |
           set -euo pipefail
+          set -f  # word-split $STACKS without glob expansion
           # shellcheck disable=SC2086
           matrix="$(printf '%s\n' $STACKS | jq -R . | jq -cs 'map(select(length > 0))')"
+          if [ "$matrix" = "[]" ]; then
+            echo "::error::no stacks resolved from the 'stacks' input"
+            exit 1
+          fi
           echo "stacks=$matrix" >> "$GITHUB_OUTPUT"
 
   # One flow per stack. Stacks apply in parallel (fail-fast off so one stack's

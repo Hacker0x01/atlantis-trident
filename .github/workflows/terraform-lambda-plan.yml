@@ -93,8 +93,8 @@ jobs:
               printf 'TF_VAR_%s=%s\n' "$key" "$val" >> "$GITHUB_ENV"
             done <<< "$text"
           }
-          [ -n "${TF_VARS:-}" ] && emit nomask "$TF_VARS" || true
-          [ -n "${TF_VAR_SECRETS:-}" ] && emit mask "$TF_VAR_SECRETS" || true
+          if [ -n "${TF_VARS:-}" ]; then emit nomask "$TF_VARS"; fi
+          if [ -n "${TF_VAR_SECRETS:-}" ]; then emit mask "$TF_VAR_SECRETS"; fi
       - name: Format check
         id: fmt
         continue-on-error: true

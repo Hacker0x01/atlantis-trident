@@ -2,8 +2,17 @@ name: terraform-lambda-deploy
 on:
   workflow_call:
     inputs:
-      build_command: { required: true, type: string }
-      artifact_path: { required: true, type: string }
+      # Multi-app fan-out: a JSON array of objects, one per app/stack:
+      #   [{ "build_command": "...", "artifact_path": "...", "working_directory": "..." }]
+      # When set, each element becomes its own build+apply flow (parallel).
+      # Leave empty to deploy a single app from the scalar inputs below.
+      apps:
+        required: false
+        type: string
+        default: ""
+      # Single-app inputs (used only when `apps` is empty).
+      build_command: { required: false, type: string, default: "" }
+      artifact_path: { required: false, type: string, default: "" }
       working_directory: { required: false, type: string, default: "terraform" }
       python_version: { required: false, type: string, default: "3.13" }
       use_uv: { required: false, type: boolean, default: true }
@@ -11,7 +20,14 @@ on:
       terraform_version: { required: false, type: string, default: "1.11.4" }
       aws_region: { required: false, type: string, default: "us-west-2" }
       project: { required: false, type: string, default: "" }
-      environment: { required: false, type: string, default: "production" }
+      environment:
+        description: >
+          Protected environment (required reviewers). NOTE: with one flow per
+          app, each app is a separate deployment to this environment and needs
+          its own approval.
+        required: false
+        type: string
+        default: "production"
     secrets:
       tf_var_secrets: { required: false }
       AWS_GITHUB_ACTIONS_ROLE_ARN: { required: false }
@@ -25,9 +41,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Build the app matrix: use `apps` if given, else synthesize a single-element
+  # matrix from the scalar inputs. Fails if neither is provided.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.matrix.outputs.apps }}
+    steps:
+      - name: Build app matrix
+        id: matrix
+        shell: bash
+        env:
+          APPS: ${{ inputs.apps }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          ARTIFACT_PATH: ${{ inputs.artifact_path }}
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPS:-}" ] && [ "$APPS" != "[]" ]; then
+            matrix="$(echo "$APPS" | jq -c 'map(select(.build_command and .artifact_path))')"
+          else
+            if [ -z "$BUILD_COMMAND" ] || [ -z "$ARTIFACT_PATH" ]; then
+              echo "::error::provide either the apps input (JSON array) or build_command + artifact_path"
+              exit 1
+            fi
+            matrix="$(jq -cn \
+              --arg b "$BUILD_COMMAND" \
+              --arg a "$ARTIFACT_PATH" \
+              --arg w "$WORKING_DIRECTORY" \
+              '[{build_command:$b, artifact_path:$a, working_directory:$w}]')"
+          fi
+          echo "apps=$matrix" >> "$GITHUB_OUTPUT"
+
+  # One flow per app: build its artifact, then Terraform apply it. Parallel.
   deploy:
+    needs: prepare
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJSON(needs.prepare.outputs.apps) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Resolve project
@@ -55,8 +109,8 @@ jobs:
       - name: Build Lambda artifact
         shell: bash
         env:
-          BUILD_COMMAND: ${{ inputs.build_command }}
-          ARTIFACT_PATH: ${{ inputs.artifact_path }}
+          BUILD_COMMAND: ${{ matrix.app.build_command }}
+          ARTIFACT_PATH: ${{ matrix.app.artifact_path }}
         run: |
           set -euo pipefail
           bash -euo pipefail -c "$BUILD_COMMAND"
@@ -76,7 +130,7 @@ jobs:
       - name: Export TF vars
         shell: bash
         env:
-          ARTIFACT_PATH: ${{ inputs.artifact_path }}
+          ARTIFACT_PATH: ${{ matrix.app.artifact_path }}
           TF_VARS: ${{ inputs.tf_vars }}
           TF_VAR_SECRETS: ${{ secrets.tf_var_secrets }}
         run: |
@@ -97,7 +151,7 @@ jobs:
           if [ -n "${TF_VAR_SECRETS:-}" ]; then emit mask "$TF_VAR_SECRETS"; fi
       - name: Apply
         shell: bash
-        working-directory: ${{ inputs.working_directory }}
+        working-directory: ${{ matrix.app.working_directory }}
         env:
           STATE_BUCKET: ${{ steps.setup.outputs.state_bucket }}
         run: |

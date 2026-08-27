@@ -3,7 +3,12 @@ on:
   workflow_call:
     inputs:
       stacks:
-        description: Space-separated, dependency-ordered stack names under <working_directory>/stacks/.
+        description: >
+          Space-separated stack names under <working_directory>/stacks/.
+          Each is applied as its OWN parallel job (one flow per stack). Stacks
+          run concurrently — do not rely on apply order; if a stack reads
+          another's remote_state, ensure that stack has been applied at least
+          once (bootstrap) so the read doesn't race.
         required: true
         type: string
       terraform_version:
@@ -23,7 +28,10 @@ on:
         type: string
         default: "terraform"
       environment:
-        description: Protected environment gating the apply (required reviewers).
+        description: >
+          Protected environment gating the apply (required reviewers). NOTE:
+          with one job per stack, each stack is a separate deployment to this
+          environment and requires its own approval.
         required: false
         type: string
         default: "production"
@@ -37,9 +45,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Turn the space-separated `stacks` string into a JSON array so the apply job
+  # can fan out one matrix job per stack.
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      stacks: ${{ steps.matrix.outputs.stacks }}
+    steps:
+      - name: Build stack matrix
+        id: matrix
+        shell: bash
+        env:
+          STACKS: ${{ inputs.stacks }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          matrix="$(printf '%s\n' $STACKS | jq -R . | jq -cs 'map(select(length > 0))')"
+          echo "stacks=$matrix" >> "$GITHUB_OUTPUT"
+
+  # One flow per stack. Stacks apply in parallel (fail-fast off so one stack's
+  # failure doesn't cancel the others).
   apply:
+    needs: prepare
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.prepare.outputs.stacks) }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -48,8 +81,7 @@ jobs:
       - name: Setup
         id: setup
         # Full owner/repo path + release ref: a reusable workflow's `./` paths
-        # resolve against the CALLER's checkout, not this repo. Composite refs
-        # track the release tag. @main is temporary pre-v1 — flip to @v1 at release.
+        # resolve against the CALLER's checkout, not this repo.
         uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@v1
         with:
           terraform_version: ${{ inputs.terraform_version }}
@@ -57,17 +89,12 @@ jobs:
           project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws_auth: oidc
-      - name: Apply stacks in order
+      - name: Apply ${{ matrix.stack }}
         shell: bash
         env:
           STATE_BUCKET: ${{ steps.setup.outputs.state_bucket }}
-          STACKS: ${{ inputs.stacks }}
+          STACK: ${{ matrix.stack }}
         run: |
           set -e
-          # shellcheck disable=SC2086
-          for stack in $STACKS; do
-            echo "::group::apply $stack"
-            terraform -chdir="stacks/$stack" init -input=false -backend-config="bucket=$STATE_BUCKET"
-            terraform -chdir="stacks/$stack" apply -input=false -auto-approve
-            echo "::endgroup::"
-          done
+          terraform -chdir="stacks/$STACK" init -input=false -backend-config="bucket=$STATE_BUCKET"
+          terraform -chdir="stacks/$STACK" apply -input=false -auto-approve

@@ -30,6 +30,10 @@ To cut a later version (e.g. `v1.1.0`): repeat — bump the composite refs to th
 new tag, tag it, move `@v1`. The composite refs are the one internal thing that
 must be bumped by hand each release (Dependabot doesn't track same-repo refs).
 
+## v1.1.0 — Lambda workflows
+
+The Lambda workflows (`terraform-lambda-plan.yml` and `terraform-lambda-deploy.yml`) are **additive** — the v1 multi-stack workflows (`terraform-plan.yml` and `terraform-apply.yml`) are unchanged. Both sets ship together by tagging `v1.1.0` and moving the `@v1` alias per the procedure above. The Lambda workflows reference the same shared composites (`setup-terraform-aws`, `tf-plan-comment`) at `@v1`, consistent with the release.
+
 ## Maintenance
 
 The docker-pinned actionlint/shellcheck digests in `ci.yml` are NOT tracked by Dependabot. Bump them manually on a quarterly cadence.

@@ -2,15 +2,28 @@ name: terraform-apply
 on:
   workflow_call:
     inputs:
+      ordered_stacks:
+        description: >
+          Space-separated stack names applied SERIALLY in the given order (one
+          flow per stack, max-parallel 1). Use for stacks with dependencies
+          (e.g. one reads another's remote_state).
+        required: false
+        type: string
+        default: ""
+      parallel_stacks:
+        description: >
+          Space-separated stack names applied in PARALLEL (one flow per stack),
+          AFTER the ordered group succeeds. Use for independent stacks.
+        required: false
+        type: string
+        default: ""
       stacks:
         description: >
-          Space-separated stack names under <working_directory>/stacks/.
-          Each is applied as its OWN parallel job (one flow per stack). Stacks
-          run concurrently — do not rely on apply order; if a stack reads
-          another's remote_state, ensure that stack has been applied at least
-          once (bootstrap) so the read doesn't race.
-        required: true
+          DEPRECATED back-compat alias for ordered_stacks. If ordered_stacks is
+          empty, this is used as the ordered group.
+        required: false
         type: string
+        default: ""
       terraform_version:
         required: false
         type: string
@@ -29,9 +42,8 @@ on:
         default: "terraform"
       environment:
         description: >
-          Protected environment gating the apply (required reviewers). NOTE:
-          with one job per stack, each stack is a separate deployment to this
-          environment and requires its own approval.
+          Protected environment (required reviewers). NOTE: each stack is a
+          separate deployment to this environment and needs its own approval.
         required: false
         type: string
         default: "production"
@@ -45,39 +57,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Turn the space-separated `stacks` string into a JSON array so the apply job
-  # can fan out one matrix job per stack.
+  # Parse the ordered and parallel stack lists into JSON matrices.
   prepare:
     runs-on: ubuntu-latest
     outputs:
-      stacks: ${{ steps.matrix.outputs.stacks }}
+      ordered: ${{ steps.m.outputs.ordered }}
+      parallel: ${{ steps.m.outputs.parallel }}
     steps:
-      - name: Build stack matrix
-        id: matrix
+      - name: Build stack matrices
+        id: m
         shell: bash
         env:
+          ORDERED_STACKS: ${{ inputs.ordered_stacks }}
           STACKS: ${{ inputs.stacks }}
+          PARALLEL_STACKS: ${{ inputs.parallel_stacks }}
         run: |
           set -euo pipefail
-          set -f  # word-split $STACKS without glob expansion
+          set -f  # word-split without glob expansion
+          ordered_in="${ORDERED_STACKS:-}"
+          [ -n "$ordered_in" ] || ordered_in="${STACKS:-}"   # back-compat alias
           # shellcheck disable=SC2086
-          matrix="$(printf '%s\n' $STACKS | jq -R . | jq -cs 'map(select(length > 0))')"
-          if [ "$matrix" = "[]" ]; then
-            echo "::error::no stacks resolved from the 'stacks' input"
+          ordered="$(printf '%s\n' $ordered_in | jq -R . | jq -cs 'map(select(length > 0))')"
+          # shellcheck disable=SC2086
+          parallel="$(printf '%s\n' ${PARALLEL_STACKS:-} | jq -R . | jq -cs 'map(select(length > 0))')"
+          if [ "$ordered" = "[]" ] && [ "$parallel" = "[]" ]; then
+            echo "::error::no stacks provided (set ordered_stacks and/or parallel_stacks)"
             exit 1
           fi
-          echo "stacks=$matrix" >> "$GITHUB_OUTPUT"
+          echo "ordered=$ordered" >> "$GITHUB_OUTPUT"
+          echo "parallel=$parallel" >> "$GITHUB_OUTPUT"
 
-  # One flow per stack. Stacks apply in parallel (fail-fast off so one stack's
-  # failure doesn't cancel the others).
-  apply:
+  # Ordered group: one flow per stack, serial, in order.
+  apply-ordered:
     needs: prepare
+    if: ${{ needs.prepare.outputs.ordered != '[]' }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     strategy:
-      fail-fast: false
+      max-parallel: 1
+      fail-fast: true
       matrix:
-        stack: ${{ fromJSON(needs.prepare.outputs.stacks) }}
+        stack: ${{ fromJSON(needs.prepare.outputs.ordered) }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -85,8 +105,43 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Setup
         id: setup
-        # Full owner/repo path + release ref: a reusable workflow's `./` paths
-        # resolve against the CALLER's checkout, not this repo.
+        uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@v1
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          aws_region: ${{ inputs.aws_region }}
+          project: ${{ inputs.project }}
+          role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws_auth: oidc
+      - name: Apply ${{ matrix.stack }}
+        shell: bash
+        env:
+          STATE_BUCKET: ${{ steps.setup.outputs.state_bucket }}
+          STACK: ${{ matrix.stack }}
+        run: |
+          set -e
+          terraform -chdir="stacks/$STACK" init -input=false -backend-config="bucket=$STATE_BUCKET"
+          terraform -chdir="stacks/$STACK" apply -input=false -auto-approve
+
+  # Parallel group: one flow per stack, concurrent, AFTER the ordered group.
+  apply-parallel:
+    needs: [prepare, apply-ordered]
+    # Run when there are parallel stacks and the ordered group didn't fail.
+    # !cancelled() lets this run even when apply-ordered was skipped (no ordered
+    # stacks); the result check blocks it only on a real ordered failure.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.apply-ordered.result != 'failure' && needs.prepare.outputs.parallel != '[]' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        stack: ${{ fromJSON(needs.prepare.outputs.parallel) }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Setup
+        id: setup
         uses: Hacker0x01/atlantis-trident/.github/actions/setup-terraform-aws@v1
         with:
           terraform_version: ${{ inputs.terraform_version }}

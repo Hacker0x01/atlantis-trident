@@ -52,3 +52,19 @@ jobs:
     # terraform-plan.yml references secrets.AWS_GITHUB_ACTIONS_ROLE_ARN; inherit
     # so the call satisfies the reference (unused when aws_auth=none).
     secrets: inherit
+  lambda-smoke:
+    needs: [lint, unit]
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/terraform-lambda-plan.yml
+    with:
+      build_command: "bash examples/lambda-fixture/build.sh"
+      artifact_path: "examples/lambda-fixture/dist/lambda.zip"
+      working_directory: examples/lambda-fixture/terraform
+      use_uv: false
+      aws_auth: none
+    secrets:
+      tf_var_secrets: |
+        some_secret=smoke-value

@@ -1,0 +1,21 @@
+name: terraform-lambda-plan
+on:
+  pull_request:
+    paths: ["terraform/**", "src/**", ".github/workflows/terraform-lambda-plan.yml"]
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+jobs:
+  plan:
+    uses: Hacker0x01/atlantis-trident/.github/workflows/terraform-lambda-plan.yml@v1
+    with:
+      build_command: "uv run mypkg build"   # your build; must write artifact_path
+      artifact_path: "dist/lambda.zip"
+    secrets:
+      # Named secrets block => must pass the role explicitly (can't also `inherit`).
+      AWS_GITHUB_ACTIONS_ROLE_ARN: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+      # optional — assemble from your OWN secrets; each becomes TF_VAR_<key>.
+      # Mark the matching TF variable `sensitive = true` if it lands in plan output.
+      tf_var_secrets: |
+        some_api_key=${{ secrets.SOME_API_KEY }}

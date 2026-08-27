@@ -68,11 +68,15 @@ jobs:
         run: |
           set -euo pipefail
           # Keep entries with build_command + artifact_path; default working_directory.
-          normalize() { echo "$1" | jq -c 'map(select(.build_command and .artifact_path) | .working_directory //= "terraform")'; }
+          normalize() { jq -c 'map(select(.build_command and .artifact_path) | .working_directory //= "terraform")' <<< "$1"; }
 
           ordered="[]"
           if [ -n "${ORDERED_APPS:-}" ] && [ "$ORDERED_APPS" != "[]" ]; then
             ordered="$(normalize "$ORDERED_APPS")"
+            if [ "$ordered" = "[]" ]; then
+              echo "::error::ordered_apps provided but no valid entries (each needs build_command + artifact_path)"
+              exit 1
+            fi
           fi
 
           parallel_src="${PARALLEL_APPS:-}"
@@ -80,6 +84,10 @@ jobs:
           parallel="[]"
           if [ -n "$parallel_src" ] && [ "$parallel_src" != "[]" ]; then
             parallel="$(normalize "$parallel_src")"
+            if [ "$parallel" = "[]" ]; then
+              echo "::error::parallel_apps/apps provided but no valid entries (each needs build_command + artifact_path)"
+              exit 1
+            fi
           elif [ "$ordered" = "[]" ] && [ -n "$BUILD_COMMAND" ] && [ -n "$ARTIFACT_PATH" ]; then
             # single-app fallback from scalar inputs
             parallel="$(jq -cn \
@@ -122,7 +130,9 @@ jobs:
 
   deploy-parallel:
     needs: [prepare, deploy-ordered]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.deploy-ordered.result != 'failure' && needs.prepare.outputs.parallel != '[]' }}
+    # Allowlist (success||skipped) so a cancelled ordered group also blocks the
+    # parallel group; prepare.result guard is required alongside !cancelled().
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.deploy-ordered.result == 'success' || needs.deploy-ordered.result == 'skipped') && needs.prepare.outputs.parallel != '[]' }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     strategy:

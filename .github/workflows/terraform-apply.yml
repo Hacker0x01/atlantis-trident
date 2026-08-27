@@ -125,10 +125,12 @@ jobs:
   # Parallel group: one flow per stack, concurrent, AFTER the ordered group.
   apply-parallel:
     needs: [prepare, apply-ordered]
-    # Run when there are parallel stacks and the ordered group didn't fail.
-    # !cancelled() lets this run even when apply-ordered was skipped (no ordered
-    # stacks); the result check blocks it only on a real ordered failure.
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.apply-ordered.result != 'failure' && needs.prepare.outputs.parallel != '[]' }}
+    # Run when there are parallel stacks and the ordered group succeeded or was
+    # skipped (no ordered stacks). Allowlist (not `!= failure`) so a cancelled
+    # ordered job also blocks the parallel group. !cancelled() lets this run
+    # after apply-ordered is skipped; the prepare.result guard is required
+    # because with !cancelled() the implicit success() is dropped.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.apply-ordered.result == 'success' || needs.apply-ordered.result == 'skipped') && needs.prepare.outputs.parallel != '[]' }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     strategy:

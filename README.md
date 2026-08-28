@@ -19,12 +19,24 @@ These replace the copy-pasted inline workflows that drifted across `misty-mounta
 
 Copy `examples/terraform-plan.yml` and `examples/terraform-apply.yml` into `.github/workflows/` in your repo.
 
-Edit the `stacks` input to list your stacks in **dependency order** (space-separated):
+**For the plan workflow**, edit the `stacks` input to list your stacks in **dependency order** (space-separated):
 
 ```yaml
+# terraform-plan.yml
 with:
   stacks: "storage catalog messaging secrets datadog mwaa"
 ```
+
+**For the apply workflow**, use `ordered_stacks` (applied serially) and/or `parallel_stacks` (applied in parallel after the ordered group):
+
+```yaml
+# terraform-apply.yml
+with:
+  ordered_stacks: "storage catalog"           # applied serially, in order
+  parallel_stacks: "messaging secrets datadog mwaa"  # applied in parallel, after ordered
+```
+
+**Why the difference?** The plan workflow aggregates all stacks into a single sticky PR comment (one comment per workflow run), so it takes a single `stacks` input. The apply workflow creates one matrix job per stack, with each stack deployed to the protected environment independently (one approval per stack), so it uses the two-group inputs (`ordered_stacks`/`parallel_stacks`) to express dependencies and concurrency explicitly. The legacy `stacks` input is still supported in the apply workflow as a back-compat alias for `ordered_stacks`.
 
 ### 2. Ensure the repository has the required secret and environment
 
@@ -71,6 +83,7 @@ The plan workflow runs on PRs that touch `terraform/**` or `.github/workflows/te
 | `project` | No | Repository name | Name prefix for the state bucket; bucket is `<project>-tfstate-<account>`. |
 | `working_directory` | No | `terraform` | Directory containing the `stacks/` subdirectory. |
 | `aws_auth` | No | `oidc` | Authentication mode: `oidc` (default, uses OIDC role) or `none` (offline validate/plan with `-backend=false`). |
+| `state_bucket` | No | `""` | Override the derived `<project>-tfstate-<account>` bucket name. Use for repos with pre-existing/non-matching state buckets (e.g., `isengard-tfstate-<account>-us-west-2`). Your `backend.tf` still supplies the `key`. |
 
 **Secrets:** Pass `secrets: inherit` to make `AWS_GITHUB_ACTIONS_ROLE_ARN` available (required when `aws_auth: oidc`).
 
@@ -88,12 +101,29 @@ permissions:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `stacks` | **Yes** | — | Space-separated, dependency-ordered stack names under `<working_directory>/stacks/`. |
+| `ordered_stacks` | No | `""` | Space-separated stack names applied **serially** in the given order (one flow per stack, max-parallel 1). Use for stacks with dependencies (e.g., one reads another's `remote_state`). |
+| `parallel_stacks` | No | `""` | Space-separated stack names applied **in parallel** (one flow per stack), only **after** the ordered group succeeds. Use for independent stacks. |
+| `stacks` | No | `""` | **DEPRECATED** back-compat alias for `ordered_stacks`. If `ordered_stacks` is empty, this is used as the ordered group. |
 | `terraform_version` | No | `1.11.4` | Terraform version to install. |
 | `aws_region` | No | `us-west-2` | AWS region for OIDC and Terraform operations. |
 | `project` | No | Repository name | Name prefix for the state bucket; bucket is `<project>-tfstate-<account>`. |
 | `working_directory` | No | `terraform` | Directory containing the `stacks/` subdirectory. |
-| `environment` | No | `production` | Protected environment name (gates apply with required reviewers). |
+| `environment` | No | `production` | Protected environment name (gates apply with required reviewers). **NOTE:** Each stack is a separate deployment to this environment and needs its own approval. |
+| `state_bucket` | No | `""` | Override the derived `<project>-tfstate-<account>` bucket name. Use for repos with pre-existing/non-matching state buckets (e.g., `isengard-tfstate-<account>-us-west-2`). Your `backend.tf` still supplies the `key`. |
+
+**At least one of** `ordered_stacks` **or** `parallel_stacks` **must be provided.** The workflow will error if both are empty.
+
+**Ordered-then-parallel model:** The workflow applies the `ordered_stacks` group first (serially, in order), then applies the `parallel_stacks` group (all in parallel) only after the ordered group succeeds. This lets you express dependencies (ordered) and independence (parallel) explicitly.
+
+**One approval per stack:** Each stack is a separate matrix job deployed to the protected environment, so each stack triggers its own approval gate. For a workflow with 2 ordered stacks and 3 parallel stacks, you will approve 5 times total (2 serial, then 3 concurrent).
+
+**Example:** For a repo with foundational stacks (`storage`, `catalog`) that must apply first, and independent stacks (`messaging`, `secrets`, `datadog`, `mwaa`) that can apply in parallel afterward:
+
+```yaml
+with:
+  ordered_stacks: "storage catalog"
+  parallel_stacks: "messaging secrets datadog mwaa"
+```
 
 **Secrets:** Pass `secrets: inherit` to make `AWS_GITHUB_ACTIONS_ROLE_ARN` available.
 
@@ -179,10 +209,10 @@ See `RELEASING.md` for the release procedure.
 
 For repos that build a Lambda function and deploy it with Terraform (**Model B**: build artifact → Terraform apply), Atlantis Trident provides two additional reusable workflows:
 
-- **`terraform-lambda-plan.yml`** — runs on pull requests: builds the Lambda zip, exports it as `TF_VAR_lambda_zip`, runs format check + validate + plan, and posts a sticky PR comment.
-- **`terraform-lambda-deploy.yml`** — runs on main branch pushes: builds the Lambda zip, exports it as `TF_VAR_lambda_zip`, and applies after a protected environment approval gate.
+- **`terraform-lambda-plan.yml`** — runs on pull requests: builds the Lambda zip, exports it as `TF_VAR_lambda_zip`, runs format check + validate + plan, and posts a sticky PR comment. **Single-app only** (plans aggregate all changes into one comment).
+- **`terraform-lambda-deploy.yml`** — runs on main branch pushes: builds the Lambda zip(s), exports each as `TF_VAR_lambda_zip`, and applies after a protected environment approval gate. **Supports multi-app** with `ordered_apps` and `parallel_apps` (JSON arrays of app objects), or **single-app** mode with scalar `build_command` + `artifact_path` inputs.
 
-These workflows are **single-app**: they build one artifact and apply one Terraform root per invocation. Multi-app repos (monorepos with multiple Lambda functions) should drive a matrix in their own caller workflow and invoke the reusable workflow once per app.
+The deploy workflow mirrors the two-group model from `terraform-apply.yml`: you can specify `ordered_apps` (applied serially) and `parallel_apps` (applied in parallel after the ordered group), each as a JSON array of `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}` objects. The workflow calls the new **`build-deploy-lambda`** composite action once per app, which encapsulates the per-app build → Terraform apply sequence.
 
 ### When to use
 
@@ -306,6 +336,7 @@ See `examples/terraform-lambda-plan.yml`, `examples/terraform-lambda-deploy.yml`
 | `aws_region` | No | `us-west-2` | AWS region for OIDC and Terraform operations. |
 | `project` | No | Repository name | Name prefix for the state bucket; bucket is `<project>-tfstate-<account>`. |
 | `aws_auth` | No | `oidc` | Authentication mode: `oidc` (default, uses OIDC role) or `none` (offline validate/plan with `-backend=false`). |
+| `state_bucket` | No | `""` | Override the derived `<project>-tfstate-<account>` bucket name. Use for repos with pre-existing/non-matching state buckets (e.g., `isengard-tfstate-<account>-us-west-2`). Your `backend.tf` still supplies the `key`. |
 
 **Secrets:**
 - `tf_var_secrets` (optional) — multiline `KEY=value` text for sensitive Terraform variables. Each becomes `TF_VAR_<key>`, masked in logs.
@@ -325,16 +356,56 @@ permissions:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `build_command` | **Yes** | — | Shell command to build the Lambda artifact. Must write `artifact_path`. |
-| `artifact_path` | **Yes** | — | Relative path to the Lambda zip produced by `build_command`. |
-| `working_directory` | No | `terraform` | Directory containing your Terraform root module. |
+| `ordered_apps` | No | `""` | JSON array of app objects built+applied **serially** in order (one flow each). Each object: `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}`. The `working_directory` field defaults to `"terraform"` if omitted. |
+| `parallel_apps` | No | `""` | JSON array of app objects built+applied **in parallel**, after the ordered group. Each object: `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}`. The `working_directory` field defaults to `"terraform"` if omitted. |
+| `apps` | No | `""` | **DEPRECATED** back-compat alias for `parallel_apps`. |
+| `build_command` | No | `""` | **(Single-app mode)** Shell command to build the Lambda artifact. Must write `artifact_path`. Used only when no app lists are provided. |
+| `artifact_path` | No | `""` | **(Single-app mode)** Relative path to the Lambda zip produced by `build_command`. Used only when no app lists are provided. |
+| `working_directory` | No | `terraform` | **(Single-app mode)** Directory containing your Terraform root module. Used only when no app lists are provided. |
 | `python_version` | No | `3.13` | Python version for the build (if needed). |
 | `use_uv` | No | `true` | Whether to install `uv` and run `uv sync` before the build. Set to `false` if you don't use `uv`. |
 | `tf_vars` | No | `""` | Multiline `KEY=value` text for non-sensitive Terraform variables. Each becomes `TF_VAR_<key>`, unmasked. |
 | `terraform_version` | No | `1.11.4` | Terraform version to install. |
 | `aws_region` | No | `us-west-2` | AWS region for OIDC and Terraform operations. |
 | `project` | No | Repository name | Name prefix for the state bucket; bucket is `<project>-tfstate-<account>`. |
-| `environment` | No | `production` | Protected environment name (gates apply with required reviewers). |
+| `environment` | No | `production` | Protected environment name (gates apply with required reviewers). **NOTE:** Each app is a separate deployment to this environment and needs its own approval. |
+| `state_bucket` | No | `""` | Override the derived `<project>-tfstate-<account>` bucket name. Use for repos with pre-existing/non-matching state buckets (e.g., `isengard-tfstate-<account>-us-west-2`). Your `backend.tf` still supplies the `key`. |
+
+**At least one of** `ordered_apps`, `parallel_apps`, **or the single-app scalar inputs** (`build_command` + `artifact_path`) **must be provided.** The workflow will error if all are empty.
+
+**Ordered-then-parallel model:** The workflow builds+applies the `ordered_apps` group first (serially, in order), then builds+applies the `parallel_apps` group (all in parallel) only after the ordered group succeeds. This mirrors the `terraform-apply.yml` two-group model but for Lambda apps.
+
+**Single-app mode:** If you provide `build_command` and `artifact_path` (and optionally `working_directory`) without any app lists, the workflow treats it as a single app in the parallel group. This mode is backward-compatible with the original single-app API.
+
+**Per-app `working_directory`:** Each app object can specify its own `working_directory` (defaults to `"terraform"` if omitted). This lets monorepos place Terraform roots in app-specific subdirectories (e.g., `apps/foo/terraform`, `apps/bar/terraform`).
+
+**Build contract:** Each app's `build_command` must write its `artifact_path`. The workflow calls the new `build-deploy-lambda` composite action for each app, which runs the build, exports `TF_VAR_lambda_zip` as an absolute path, and applies the Terraform root at the app's `working_directory`.
+
+**One approval per app:** Each app is a separate matrix job deployed to the protected environment, so each app triggers its own approval gate. For a workflow with 1 ordered app and 3 parallel apps, you will approve 4 times total (1 serial, then 3 concurrent).
+
+**Example (multi-app with groups):**
+
+```yaml
+with:
+  ordered_apps: |
+    [
+      {"build_command": "uv run build-auth", "artifact_path": "dist/auth.zip", "working_directory": "apps/auth/terraform"}
+    ]
+  parallel_apps: |
+    [
+      {"build_command": "uv run build-api", "artifact_path": "dist/api.zip"},
+      {"build_command": "uv run build-worker", "artifact_path": "dist/worker.zip"},
+      {"build_command": "uv run build-notifier", "artifact_path": "dist/notifier.zip"}
+    ]
+```
+
+**Example (single-app, backward-compatible):**
+
+```yaml
+with:
+  build_command: "uv run mypkg build"
+  artifact_path: "dist/lambda.zip"
+```
 
 **Secrets:**
 - `tf_var_secrets` (optional) — multiline `KEY=value` text for sensitive Terraform variables. Each becomes `TF_VAR_<key>`, masked in logs.

@@ -19,6 +19,10 @@ inputs:
     description: "oidc = assume role and resolve bucket; none = skip AWS (offline validate/plan)."
     required: false
     default: oidc
+  state_bucket:
+    description: Override the derived state bucket name (for pre-existing/non-matching buckets).
+    required: false
+    default: ""
 outputs:
   state_bucket:
     description: Resolved Terraform state bucket (empty when aws_auth=none).
@@ -53,11 +57,14 @@ runs:
       env:
         AWS_AUTH: ${{ inputs.aws_auth }}
         PROJECT: ${{ inputs.project }}
+        STATE_BUCKET_OVERRIDE: ${{ inputs.state_bucket }}
         REPO_NAME: ${{ github.event.repository.name }}
       run: |
         set -euo pipefail
-        project="${PROJECT:-$REPO_NAME}"
-        if [ "$AWS_AUTH" = "oidc" ]; then
+        if [ -n "$STATE_BUCKET_OVERRIDE" ]; then
+          echo "state_bucket=$STATE_BUCKET_OVERRIDE" >> "$GITHUB_OUTPUT"
+        elif [ "$AWS_AUTH" = "oidc" ]; then
+          project="${PROJECT:-$REPO_NAME}"
           account="$(aws sts get-caller-identity --query Account --output text)"
           echo "state_bucket=${project}-tfstate-${account}" >> "$GITHUB_OUTPUT"
         else

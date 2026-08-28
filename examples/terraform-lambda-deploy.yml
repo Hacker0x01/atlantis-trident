@@ -10,8 +10,21 @@ jobs:
   deploy:
     uses: Hacker0x01/atlantis-trident/.github/workflows/terraform-lambda-deploy.yml@v1
     with:
-      build_command: "uv run mypkg build"
-      artifact_path: "dist/lambda.zip"
+      # Multi-app mode: JSON arrays of app objects.
+      # Ordered apps applied serially, then parallel apps applied concurrently.
+      ordered_apps: |
+        [
+          {"build_command": "uv run build-auth", "artifact_path": "dist/auth.zip", "working_directory": "apps/auth/terraform"}
+        ]
+      parallel_apps: |
+        [
+          {"build_command": "uv run build-api", "artifact_path": "dist/api.zip"},
+          {"build_command": "uv run build-worker", "artifact_path": "dist/worker.zip"}
+        ]
+      # Legacy `apps` is a back-compat alias for `parallel_apps`.
+      # Single-app mode (backward-compatible): if no app lists are given, use scalar inputs:
+      #   build_command: "uv run mypkg build"
+      #   artifact_path: "dist/lambda.zip"
     secrets:
       AWS_GITHUB_ACTIONS_ROLE_ARN: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
       tf_var_secrets: |

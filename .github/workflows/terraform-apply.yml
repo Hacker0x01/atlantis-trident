@@ -47,6 +47,11 @@ on:
         required: false
         type: string
         default: "production"
+      state_bucket:
+        description: Override the derived state bucket name (for pre-existing/non-matching buckets).
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -112,6 +117,7 @@ jobs:
           project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws_auth: oidc
+          state_bucket: ${{ inputs.state_bucket }}
       - name: Apply ${{ matrix.stack }}
         shell: bash
         env:
@@ -151,6 +157,7 @@ jobs:
           project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws_auth: oidc
+          state_bucket: ${{ inputs.state_bucket }}
       - name: Apply ${{ matrix.stack }}
         shell: bash
         env:

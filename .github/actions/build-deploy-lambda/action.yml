@@ -16,6 +16,7 @@ inputs:
   aws_region: { required: false, default: "us-west-2" }
   project: { required: false, default: "" }
   role_arn: { required: false, default: "", description: OIDC role ARN (from AWS_GITHUB_ACTIONS_ROLE_ARN). }
+  state_bucket: { required: false, default: "", description: Override the derived state bucket name (for pre-existing/non-matching buckets). }
 runs:
   using: composite
   steps:
@@ -62,6 +63,7 @@ runs:
         project: ${{ steps.proj.outputs.project }}
         role_arn: ${{ inputs.role_arn }}
         aws_auth: oidc
+        state_bucket: ${{ inputs.state_bucket }}
     - name: Export TF vars
       shell: bash
       env:

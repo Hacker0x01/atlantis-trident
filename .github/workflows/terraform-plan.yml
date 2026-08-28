@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: "oidc"
+      state_bucket:
+        description: Override the derived state bucket name (for pre-existing/non-matching buckets).
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -59,6 +64,7 @@ jobs:
           project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws_auth: ${{ inputs.aws_auth }}
+          state_bucket: ${{ inputs.state_bucket }}
       - name: Format check
         id: fmt
         continue-on-error: true

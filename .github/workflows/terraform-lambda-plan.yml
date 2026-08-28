@@ -12,6 +12,7 @@ on:
       aws_region: { required: false, type: string, default: "us-west-2" }
       project: { required: false, type: string, default: "" }
       aws_auth: { required: false, type: string, default: "oidc" }
+      state_bucket: { required: false, type: string, default: "" }
     secrets:
       tf_var_secrets: { required: false }
       AWS_GITHUB_ACTIONS_ROLE_ARN: { required: false }
@@ -73,6 +74,7 @@ jobs:
           project: ${{ steps.proj.outputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws_auth: ${{ inputs.aws_auth }}
+          state_bucket: ${{ inputs.state_bucket }}
       - name: Export TF vars
         shell: bash
         env:

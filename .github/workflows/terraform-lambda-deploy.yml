@@ -36,6 +36,7 @@ on:
         required: false
         type: string
         default: "production"
+      state_bucket: { required: false, type: string, default: "" }
     secrets:
       tf_var_secrets: { required: false }
       AWS_GITHUB_ACTIONS_ROLE_ARN: { required: false }
@@ -127,6 +128,7 @@ jobs:
           aws_region: ${{ inputs.aws_region }}
           project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          state_bucket: ${{ inputs.state_bucket }}
 
   deploy-parallel:
     needs: [prepare, deploy-ordered]
@@ -154,3 +156,4 @@ jobs:
           aws_region: ${{ inputs.aws_region }}
           project: ${{ inputs.project }}
           role_arn: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          state_bucket: ${{ inputs.state_bucket }}

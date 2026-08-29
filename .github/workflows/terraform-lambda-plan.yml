@@ -24,7 +24,9 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: terraform-lambda-plan-${{ github.repository }}-${{ github.ref }}
+  # Include working_directory so a repo (or our CI) that plans more than one
+  # root on the same ref doesn't cancel its own concurrent plan runs.
+  group: terraform-lambda-plan-${{ github.repository }}-${{ github.ref }}-${{ inputs.working_directory }}
   cancel-in-progress: true
 
 jobs:

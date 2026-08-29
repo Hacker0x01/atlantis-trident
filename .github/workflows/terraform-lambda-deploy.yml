@@ -22,6 +22,7 @@ on:
       # Single-app scalar inputs (used only when no app lists are given).
       build_command: { required: false, type: string, default: "" }
       artifact_path: { required: false, type: string, default: "" }
+      lambda_zips: { required: false, type: string, default: "" }
       working_directory: { required: false, type: string, default: "terraform" }
       python_version: { required: false, type: string, default: "3.13" }
       use_uv: { required: false, type: boolean, default: true }
@@ -65,17 +66,18 @@ jobs:
           APPS: ${{ inputs.apps }}
           BUILD_COMMAND: ${{ inputs.build_command }}
           ARTIFACT_PATH: ${{ inputs.artifact_path }}
+          LAMBDA_ZIPS: ${{ inputs.lambda_zips }}
           WORKING_DIRECTORY: ${{ inputs.working_directory }}
         run: |
           set -euo pipefail
-          # Keep entries with build_command + artifact_path; default working_directory.
-          normalize() { jq -c 'map(select(.build_command and .artifact_path) | .working_directory //= "terraform")' <<< "$1"; }
+          # Keep entries with build_command + (artifact_path OR lambda_zips); default working_directory.
+          normalize() { jq -c 'map(select(.build_command and (.artifact_path or .lambda_zips)) | .working_directory //= "terraform")' <<< "$1"; }
 
           ordered="[]"
           if [ -n "${ORDERED_APPS:-}" ] && [ "$ORDERED_APPS" != "[]" ]; then
             ordered="$(normalize "$ORDERED_APPS")"
             if [ "$ordered" = "[]" ]; then
-              echo "::error::ordered_apps provided but no valid entries (each needs build_command + artifact_path)"
+              echo "::error::ordered_apps provided but no valid entries (each needs build_command + artifact_path or lambda_zips)"
               exit 1
             fi
           fi
@@ -86,14 +88,15 @@ jobs:
           if [ -n "$parallel_src" ] && [ "$parallel_src" != "[]" ]; then
             parallel="$(normalize "$parallel_src")"
             if [ "$parallel" = "[]" ]; then
-              echo "::error::parallel_apps/apps provided but no valid entries (each needs build_command + artifact_path)"
+              echo "::error::parallel_apps/apps provided but no valid entries (each needs build_command + artifact_path or lambda_zips)"
               exit 1
             fi
-          elif [ "$ordered" = "[]" ] && [ -n "$BUILD_COMMAND" ] && [ -n "$ARTIFACT_PATH" ]; then
-            # single-app fallback from scalar inputs
+          elif [ "$ordered" = "[]" ] && [ -n "$BUILD_COMMAND" ] && { [ -n "$ARTIFACT_PATH" ] || [ -n "${LAMBDA_ZIPS:-}" ]; }; then
+            # single-app fallback from scalar inputs (artifact_path OR lambda_zips)
+            zj="${LAMBDA_ZIPS:-}"; [ -n "$zj" ] || zj=null
             parallel="$(jq -cn \
-              --arg b "$BUILD_COMMAND" --arg a "$ARTIFACT_PATH" --arg w "$WORKING_DIRECTORY" \
-              '[{build_command:$b, artifact_path:$a, working_directory:$w}]')"
+              --arg b "$BUILD_COMMAND" --arg a "$ARTIFACT_PATH" --arg w "$WORKING_DIRECTORY" --argjson z "$zj" \
+              '[{build_command:$b, artifact_path:$a, working_directory:$w, lambda_zips:$z}]')"
           fi
 
           if [ "$ordered" = "[]" ] && [ "$parallel" = "[]" ]; then
@@ -119,6 +122,7 @@ jobs:
         with:
           build_command: ${{ matrix.app.build_command }}
           artifact_path: ${{ matrix.app.artifact_path }}
+          lambda_zips: ${{ toJSON(matrix.app.lambda_zips) }}
           working_directory: ${{ matrix.app.working_directory }}
           python_version: ${{ inputs.python_version }}
           use_uv: ${{ inputs.use_uv }}
@@ -147,6 +151,7 @@ jobs:
         with:
           build_command: ${{ matrix.app.build_command }}
           artifact_path: ${{ matrix.app.artifact_path }}
+          lambda_zips: ${{ toJSON(matrix.app.lambda_zips) }}
           working_directory: ${{ matrix.app.working_directory }}
           python_version: ${{ inputs.python_version }}
           use_uv: ${{ inputs.use_uv }}

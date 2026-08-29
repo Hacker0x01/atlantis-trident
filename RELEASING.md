@@ -60,6 +60,20 @@ This release adds an **optional `state_bucket` input** to all workflows and comp
 
 **This is a v1.x release (not v2)** because the change is **purely additive and backward-compatible**: existing consumers that omit the input continue to work exactly as before (the derived bucket name is used). The new input is opt-in for repos that need it.
 
+## v1.4.0 — Multi-artifact Lambda (lambda_zips map)
+
+This release adds **optional multi-artifact Lambda support** via a new `lambda_zips` input:
+
+- **All Lambda workflows** (`terraform-lambda-plan.yml`, `terraform-lambda-deploy.yml`) and the **`build-deploy-lambda` composite** now accept an optional `lambda_zips` input (required: false, default: `""`).
+- When `lambda_zips` is provided (a JSON map `{name: relative_path}`), the workflow resolves each path to absolute, asserts it exists, and exports `TF_VAR_lambda_zips` as a JSON map of absolute paths. The consumer's Terraform declares `variable "lambda_zips" { type = map(string) }` and each function uses `var.lambda_zips["<name>"]` for `filename` and `source_code_hash`.
+- When `lambda_zips` is set, it **takes precedence over `artifact_path`** — use one or the other, not both.
+- The `build_command` runs once and must produce all the zips listed in `lambda_zips`.
+- **This is purely additive and backward-compatible**: existing consumers using `artifact_path` continue to work exactly as before (single-artifact mode with `TF_VAR_lambda_zip`). The new `lambda_zips` input is opt-in for repos that deploy N Lambdas from one Terraform root (e.g., gandalf's collector + issue_processor + create functions with shared DynamoDB/SNS resources).
+- In the deploy workflow, each app object in `ordered_apps`/`parallel_apps` may carry **either** `artifact_path` **or** `lambda_zips`, so a monorepo with a mix of single-artifact and multi-artifact apps works.
+- The `lambda-multi-smoke` CI job validates the multi-artifact path offline (2 zips → 2 Lambda functions in one Terraform root).
+
+**Release is gated on a real cross-repo acceptance test** (the gandalf adoption PR) to verify that the multi-artifact path works end-to-end with a real build and Terraform root.
+
 ## Maintenance
 
 The docker-pinned actionlint/shellcheck digests in `ci.yml` are NOT tracked by Dependabot. Bump them manually on a quarterly cadence.

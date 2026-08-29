@@ -1,1 +1,4 @@
 examples/lambda-fixture/dist/
+examples/lambda-multi-fixture/dist/
+**/.terraform/
+**/.terraform.lock.hcl

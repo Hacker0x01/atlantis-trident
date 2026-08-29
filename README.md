@@ -209,8 +209,8 @@ See `RELEASING.md` for the release procedure.
 
 For repos that build a Lambda function and deploy it with Terraform (**Model B**: build artifact → Terraform apply), Atlantis Trident provides two additional reusable workflows:
 
-- **`terraform-lambda-plan.yml`** — runs on pull requests: builds the Lambda zip, exports it as `TF_VAR_lambda_zip`, runs format check + validate + plan, and posts a sticky PR comment. **Single-app only** (plans aggregate all changes into one comment).
-- **`terraform-lambda-deploy.yml`** — runs on main branch pushes: builds the Lambda zip(s), exports each as `TF_VAR_lambda_zip`, and applies after a protected environment approval gate. **Supports multi-app** with `ordered_apps` and `parallel_apps` (JSON arrays of app objects), or **single-app** mode with scalar `build_command` + `artifact_path` inputs.
+- **`terraform-lambda-plan.yml`** — runs on pull requests: builds the Lambda zip(s), exports as `TF_VAR_lambda_zip` (single artifact) or `TF_VAR_lambda_zips` (multi-artifact map), runs format check + validate + plan, and posts a sticky PR comment. **Single-app only** (plans aggregate all changes into one comment).
+- **`terraform-lambda-deploy.yml`** — runs on main branch pushes: builds the Lambda zip(s), exports as `TF_VAR_lambda_zip` or `TF_VAR_lambda_zips`, and applies after a protected environment approval gate. **Supports multi-app** with `ordered_apps` and `parallel_apps` (JSON arrays of app objects), or **single-app** mode with scalar `build_command` + `artifact_path` (or `lambda_zips`) inputs.
 
 The deploy workflow mirrors the two-group model from `terraform-apply.yml`: you can specify `ordered_apps` (applied serially) and `parallel_apps` (applied in parallel after the ordered group), each as a JSON array of `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}` objects. The workflow calls the new **`build-deploy-lambda`** composite action once per app, which encapsulates the per-app build → Terraform apply sequence.
 
@@ -250,18 +250,14 @@ with:
 
 #### 3. Declare the `variable "lambda_zip"` in your Terraform
 
-Your Terraform code must declare:
+**Single-artifact mode:** Your Terraform code declares `variable "lambda_zip"` and references it in your `aws_lambda_function` resource:
 
 ```hcl
 variable "lambda_zip" {
   type        = string
   description = "Path to the built Lambda zip (exported by the reusable workflow)."
 }
-```
 
-Then reference it in your `aws_lambda_function` resource:
-
-```hcl
 resource "aws_lambda_function" "example" {
   function_name    = "my-function"
   filename         = var.lambda_zip
@@ -274,6 +270,41 @@ resource "aws_lambda_function" "example" {
 
 The workflow exports `TF_VAR_lambda_zip` as an **absolute path** to the built zip, so Terraform can consume it.
 
+**Multi-artifact mode (N Lambdas in one Terraform root):** If your `build_command` produces **multiple zips** (e.g., several Lambda functions deployed from one Terraform root with shared resources like DynamoDB/SNS/SQS), use the `lambda_zips` input (a JSON map `{name: relative_path}`) instead of `artifact_path`. Your Terraform code declares `variable "lambda_zips"` (type `map(string)`) and references each function by its map key:
+
+```yaml
+with:
+  build_command: "uv run mypkg build all"
+  lambda_zips: '{"collector":"dist/collector.zip","processor":"dist/processor.zip"}'
+```
+
+```hcl
+variable "lambda_zips" {
+  type        = map(string)
+  description = "Map of lambda name -> built zip path (exported by the workflow)."
+}
+
+resource "aws_lambda_function" "collector" {
+  function_name    = "my-collector"
+  filename         = var.lambda_zips["collector"]
+  source_code_hash = filebase64sha256(var.lambda_zips["collector"])
+  runtime          = "python3.13"
+  handler          = "collector.handler"
+  role             = aws_iam_role.lambda.arn
+}
+
+resource "aws_lambda_function" "processor" {
+  function_name    = "my-processor"
+  filename         = var.lambda_zips["processor"]
+  source_code_hash = filebase64sha256(var.lambda_zips["processor"])
+  runtime          = "python3.13"
+  handler          = "processor.handler"
+  role             = aws_iam_role.lambda.arn
+}
+```
+
+The workflow exports `TF_VAR_lambda_zips` as a JSON map of **absolute paths**. **When `lambda_zips` is set, it takes precedence over `artifact_path`** — use one or the other, not both. The `build_command` runs once and must produce all the zips listed in `lambda_zips`. Shared resources (DynamoDB tables, SNS topics, etc.) stay in the same Terraform root; no root split is required.
+
 #### 4. Push and open a PR
 
 The plan workflow runs on PRs that touch `terraform/**`, `src/**`, or `.github/workflows/terraform-lambda-plan.yml`. The apply workflow runs on merges to `main` after a reviewer approves the protected environment.
@@ -282,11 +313,11 @@ The plan workflow runs on PRs that touch `terraform/**`, `src/**`, or `.github/w
 
 ### Build contract
 
-- **Your `build_command` must write `artifact_path`**  
-  The workflow runs your build command, then asserts that the file exists. If it doesn't, the build step fails.
+- **Your `build_command` must write `artifact_path` (single-artifact) or all paths listed in `lambda_zips` (multi-artifact)**  
+  The workflow runs your build command, then asserts that the file(s) exist. If any are missing, the build step fails with the offending path.
 
-- **The workflow exports `TF_VAR_lambda_zip` as an absolute path**  
-  After the build, the workflow resolves the artifact path to an absolute path and exports `TF_VAR_lambda_zip=<absolute-path>` to the Terraform environment. Your Terraform code consumes it via `variable "lambda_zip"` and uses it for `filename` and `source_code_hash`.
+- **The workflow exports `TF_VAR_lambda_zip` (single) or `TF_VAR_lambda_zips` (multi) as absolute paths**  
+  After the build, the workflow resolves paths to absolute and exports `TF_VAR_lambda_zip=<absolute-path>` (single-artifact mode) or `TF_VAR_lambda_zips=<json-map>` (multi-artifact mode, with each value an absolute path). Your Terraform code consumes it via `variable "lambda_zip"` or `variable "lambda_zips"` and uses it for `filename` and `source_code_hash`.
 
 ### Secrets and TF vars
 
@@ -326,8 +357,9 @@ See `examples/terraform-lambda-plan.yml`, `examples/terraform-lambda-deploy.yml`
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `build_command` | **Yes** | — | Shell command to build the Lambda artifact. Must write `artifact_path`. |
-| `artifact_path` | **Yes** | — | Relative path to the Lambda zip produced by `build_command`. |
+| `build_command` | **Yes** | — | Shell command to build the Lambda artifact(s). Must write `artifact_path` (single) or all paths listed in `lambda_zips` (multi). |
+| `artifact_path` | No | `""` | Relative path to the Lambda zip produced by `build_command` (single-artifact mode). Required if `lambda_zips` is empty. |
+| `lambda_zips` | No | `""` | JSON map `{name: relative_path}` for multi-artifact mode (N Lambdas in one Terraform root). When set, takes precedence over `artifact_path`. Your Terraform declares `variable "lambda_zips" { type = map(string) }` and each function uses `var.lambda_zips["<name>"]`. |
 | `working_directory` | No | `terraform` | Directory containing your Terraform root module. |
 | `python_version` | No | `3.13` | Python version for the build (if needed). |
 | `use_uv` | No | `true` | Whether to install `uv` and run `uv sync` before the build. Set to `false` if you don't use `uv`. |
@@ -356,11 +388,12 @@ permissions:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `ordered_apps` | No | `""` | JSON array of app objects built+applied **serially** in order (one flow each). Each object: `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}`. The `working_directory` field defaults to `"terraform"` if omitted. |
-| `parallel_apps` | No | `""` | JSON array of app objects built+applied **in parallel**, after the ordered group. Each object: `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}`. The `working_directory` field defaults to `"terraform"` if omitted. |
+| `ordered_apps` | No | `""` | JSON array of app objects built+applied **serially** in order (one flow each). Each object: `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}` (single-artifact) or `{"build_command": "...", "lambda_zips": {...}, "working_directory": "..."}` (multi-artifact). The `working_directory` field defaults to `"terraform"` if omitted. |
+| `parallel_apps` | No | `""` | JSON array of app objects built+applied **in parallel**, after the ordered group. Each object: `{"build_command": "...", "artifact_path": "...", "working_directory": "..."}` (single-artifact) or `{"build_command": "...", "lambda_zips": {...}, "working_directory": "..."}` (multi-artifact). The `working_directory` field defaults to `"terraform"` if omitted. |
 | `apps` | No | `""` | **DEPRECATED** back-compat alias for `parallel_apps`. |
-| `build_command` | No | `""` | **(Single-app mode)** Shell command to build the Lambda artifact. Must write `artifact_path`. Used only when no app lists are provided. |
-| `artifact_path` | No | `""` | **(Single-app mode)** Relative path to the Lambda zip produced by `build_command`. Used only when no app lists are provided. |
+| `build_command` | No | `""` | **(Single-app mode)** Shell command to build the Lambda artifact(s). Must write `artifact_path` (single) or all paths in `lambda_zips` (multi). Used only when no app lists are provided. |
+| `artifact_path` | No | `""` | **(Single-app mode)** Relative path to the Lambda zip produced by `build_command` (single-artifact). Used only when no app lists are provided and `lambda_zips` is empty. |
+| `lambda_zips` | No | `""` | **(Single-app mode)** JSON map `{name: relative_path}` for multi-artifact mode (N Lambdas in one root). When set, takes precedence over `artifact_path`. Used only when no app lists are provided. |
 | `working_directory` | No | `terraform` | **(Single-app mode)** Directory containing your Terraform root module. Used only when no app lists are provided. |
 | `python_version` | No | `3.13` | Python version for the build (if needed). |
 | `use_uv` | No | `true` | Whether to install `uv` and run `uv sync` before the build. Set to `false` if you don't use `uv`. |

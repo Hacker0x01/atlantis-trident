@@ -22,6 +22,7 @@ on:
       # Single-app scalar inputs (used only when no app lists are given).
       build_command: { required: false, type: string, default: "" }
       artifact_path: { required: false, type: string, default: "" }
+      lambda_zips: { required: false, type: string, default: "" }
       working_directory: { required: false, type: string, default: "terraform" }
       python_version: { required: false, type: string, default: "3.13" }
       use_uv: { required: false, type: boolean, default: true }
@@ -119,6 +120,7 @@ jobs:
         with:
           build_command: ${{ matrix.app.build_command }}
           artifact_path: ${{ matrix.app.artifact_path }}
+          lambda_zips: ${{ matrix.app.lambda_zips }}
           working_directory: ${{ matrix.app.working_directory }}
           python_version: ${{ inputs.python_version }}
           use_uv: ${{ inputs.use_uv }}
@@ -147,6 +149,7 @@ jobs:
         with:
           build_command: ${{ matrix.app.build_command }}
           artifact_path: ${{ matrix.app.artifact_path }}
+          lambda_zips: ${{ matrix.app.lambda_zips }}
           working_directory: ${{ matrix.app.working_directory }}
           python_version: ${{ inputs.python_version }}
           use_uv: ${{ inputs.use_uv }}

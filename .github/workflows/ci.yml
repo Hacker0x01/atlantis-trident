@@ -68,3 +68,16 @@ jobs:
     secrets:
       tf_var_secrets: |
         some_secret=smoke-value
+  lambda-multi-smoke:
+    needs: [lint, unit]
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/terraform-lambda-plan.yml
+    with:
+      build_command: "bash examples/lambda-multi-fixture/build.sh"
+      lambda_zips: '{"a":"examples/lambda-multi-fixture/dist/a.zip","b":"examples/lambda-multi-fixture/dist/b.zip"}'
+      working_directory: examples/lambda-multi-fixture/terraform
+      use_uv: false
+      aws_auth: none

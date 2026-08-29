@@ -6,7 +6,8 @@ description: >
   have already run actions/checkout.
 inputs:
   build_command: { required: true, description: Shell command that writes the zip to artifact_path. }
-  artifact_path: { required: true, description: Path to the built zip (exported as TF_VAR_lambda_zip). }
+  artifact_path: { required: false, default: "", description: Path to the built zip (exported as TF_VAR_lambda_zip). }
+  lambda_zips: { required: false, default: "", description: JSON map of lambda name -> built zip path (exported as TF_VAR_lambda_zips). }
   working_directory: { required: false, default: "terraform", description: Terraform root for this app. }
   python_version: { required: false, default: "3.13" }
   use_uv: { required: false, default: "true" }
@@ -47,12 +48,15 @@ runs:
       env:
         BUILD_COMMAND: ${{ inputs.build_command }}
         ARTIFACT_PATH: ${{ inputs.artifact_path }}
+        LAMBDA_ZIPS: ${{ inputs.lambda_zips }}
       run: |
         set -euo pipefail
         bash -euo pipefail -c "$BUILD_COMMAND"
-        if [ ! -f "$ARTIFACT_PATH" ]; then
-          echo "::error::build_command did not produce artifact_path: $ARTIFACT_PATH"
-          exit 1
+        if [ -z "${LAMBDA_ZIPS:-}" ] || [ "$LAMBDA_ZIPS" = "{}" ]; then
+          if [ ! -f "$ARTIFACT_PATH" ]; then
+            echo "::error::build_command did not produce artifact_path: $ARTIFACT_PATH"
+            exit 1
+          fi
         fi
     - name: Setup Terraform + AWS
       id: setup
@@ -68,12 +72,28 @@ runs:
       shell: bash
       env:
         ARTIFACT_PATH: ${{ inputs.artifact_path }}
+        LAMBDA_ZIPS: ${{ inputs.lambda_zips }}
         TF_VARS: ${{ inputs.tf_vars }}
         TF_VAR_SECRETS: ${{ inputs.tf_var_secrets }}
       run: |
         set -euo pipefail
-        abs="$(cd "$(dirname "$ARTIFACT_PATH")" && pwd)/$(basename "$ARTIFACT_PATH")"
-        echo "TF_VAR_lambda_zip=$abs" >> "$GITHUB_ENV"
+        if [ -n "${LAMBDA_ZIPS:-}" ] && [ "$LAMBDA_ZIPS" != "{}" ]; then
+          out='{}'
+          n="$(jq 'length' <<< "$LAMBDA_ZIPS")"
+          i=0
+          while [ "$i" -lt "$n" ]; do
+            key="$(jq -r "keys_unsorted[$i]" <<< "$LAMBDA_ZIPS")"
+            rel="$(jq -r --arg k "$key" '.[$k]' <<< "$LAMBDA_ZIPS")"
+            if [ ! -f "$rel" ]; then echo "::error::lambda_zips[$key] not found: $rel"; exit 1; fi
+            abs="$(cd "$(dirname "$rel")" && pwd)/$(basename "$rel")"
+            out="$(jq -c --arg k "$key" --arg v "$abs" '. + {($k): $v}' <<< "$out")"
+            i=$((i + 1))
+          done
+          echo "TF_VAR_lambda_zips=$out" >> "$GITHUB_ENV"
+        else
+          abs="$(cd "$(dirname "$ARTIFACT_PATH")" && pwd)/$(basename "$ARTIFACT_PATH")"
+          echo "TF_VAR_lambda_zip=$abs" >> "$GITHUB_ENV"
+        fi
         emit() {
           local mask="$1" text="$2" line key val
           while IFS= read -r line || [ -n "$line" ]; do

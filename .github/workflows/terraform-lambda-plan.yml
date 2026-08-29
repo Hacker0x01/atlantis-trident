@@ -65,7 +65,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -euo pipefail -c "$BUILD_COMMAND"
-          if [ -z "${LAMBDA_ZIPS:-}" ] || [ "$LAMBDA_ZIPS" = "{}" ]; then
+          if [ -z "${LAMBDA_ZIPS:-}" ] || [ "$LAMBDA_ZIPS" = "{}" ] || [ "$LAMBDA_ZIPS" = "null" ]; then
             if [ ! -f "$ARTIFACT_PATH" ]; then
               echo "::error::build_command did not produce artifact_path: $ARTIFACT_PATH"
               exit 1
@@ -90,7 +90,7 @@ jobs:
           TF_VAR_SECRETS: ${{ secrets.tf_var_secrets }}
         run: |
           set -euo pipefail
-          if [ -n "${LAMBDA_ZIPS:-}" ] && [ "$LAMBDA_ZIPS" != "{}" ]; then
+          if [ -n "${LAMBDA_ZIPS:-}" ] && [ "$LAMBDA_ZIPS" != "{}" ] && [ "$LAMBDA_ZIPS" != "null" ]; then
             out='{}'
             n="$(jq 'length' <<< "$LAMBDA_ZIPS")"
             i=0
